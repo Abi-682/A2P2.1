@@ -1,132 +1,121 @@
-"""
-Uniform Cost Search (UCS) pathfinder for warehouse environment.
-Uses a priority queue ordered by path cost g(n) (number of steps).
-"""
-
+"""Uniform Cost Search (UCS) pathfinding for the warehouse grid."""
 from __future__ import annotations
+from dataclasses import dataclass
+from heapq import heappop, heappush
+from typing import Dict, Iterable, List, Optional, Tuple
 
-import heapq
-import time
-from typing import Dict, List, Tuple
-from warehouse_env import WarehouseEnv
-
-
-class UCSPathfinder:
-    """Uniform Cost Search pathfinder."""
-    
-    def __init__(self, grid: List[str], start_pos: Tuple[int, int], goal_pos: Tuple[int, int]):
-        """
-        Initialize UCS pathfinder.
-        
-        Args:
-            grid: The warehouse grid
-            start_pos: Starting position
-            goal_pos: Goal position
-        """
-        self.grid = grid
-        self.start_pos = start_pos
-        self.goal_pos = goal_pos
-        self.height = len(grid)
-        self.width = len(grid[0])
-        
-        # Statistics
-        self.nodes_expanded = 0
-        self.frontier_size = 0
-        self.computation_time = 0.0
-        self.path_length = 0
-        
-    def is_wall(self, pos: Tuple[int, int]) -> bool:
-        """Check if a position is a wall."""
-        r, c = pos
-        if r < 0 or c < 0 or r >= self.height or c >= self.width:
-            return True
-        return self.grid[r][c] == "#"
-    
-    def get_neighbors(self, pos: Tuple[int, int]) -> List[Tuple[int, int]]:
-        """Get valid neighbors (Manhattan distance moves)."""
-        r, c = pos
-        neighbors = []
-        for dr, dc in [(-1, 0), (0, 1), (1, 0), (0, -1)]:  # N, E, S, W
-            nr, nc = r + dr, c + dc
-            if not self.is_wall((nr, nc)):
-                neighbors.append((nr, nc))
-        return neighbors
-    
-    def search(self) -> Tuple[List[Tuple[int, int]] | None, Dict]:
-        """
-        Perform Uniform Cost Search.
-        
-        Returns:
-            Tuple of (path, statistics_dict)
-            path: List of positions from start to goal, or None if no path exists
-            statistics_dict: Dict with search statistics
-        """
-        start_time = time.time()
-        
-        # Priority queue: (cost, node)
-        frontier = [(0, self.start_pos)]
-        explored = set()
-        parent = {self.start_pos: None}
-        cost_so_far = {self.start_pos: 0}
-        
-        path = None
-        
-        while frontier:
-            self.frontier_size = len(frontier)
-            current_cost, current = heapq.heappop(frontier)
-            
-            if current in explored:
-                continue
-                
-            explored.add(current)
-            self.nodes_expanded += 1
-            
-            # Goal test
-            if current == self.goal_pos:
-                # Reconstruct path
-                path = []
-                node = current
-                while node is not None:
-                    path.append(node)
-                    node = parent[node]
-                path.reverse()
-                self.path_length = len(path)
-                break
-            
-            # Expand neighbors
-            for neighbor in self.get_neighbors(current):
-                if neighbor not in explored:
-                    new_cost = cost_so_far[current] + 1  # Each step costs 1
-                    
-                    if neighbor not in cost_so_far or new_cost < cost_so_far[neighbor]:
-                        cost_so_far[neighbor] = new_cost
-                        parent[neighbor] = current
-                        heapq.heappush(frontier, (new_cost, neighbor))
-        
-        self.computation_time = time.time() - start_time
-        
-        stats = {
-            "nodes_expanded": self.nodes_expanded,
-            "path_length": self.path_length,
-            "computation_time": self.computation_time,
-            "frontier_size": self.frontier_size,
-            "path_found": path is not None,
-        }
-        
-        return path, stats
+Position = Tuple[int, int]
 
 
-def find_path_ucs(grid: List[str], start: Tuple[int, int], goal: Tuple[int, int]) -> Tuple[List[Tuple[int, int]] | None, Dict]:
+@dataclass(frozen=True)
+class SearchResult:
+    path: List[Position]
+    cost: int
+    nodes_expanded: int
+    frontier_max: int
+    time_sec: float
+    expanded_order: List[Position]
+
+
+def _neighbors(grid: List[str], pos: Position) -> Iterable[Position]:
+    r, c = pos
+    for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+        nr, nc = r + dr, c + dc
+        if nr < 0 or nc < 0 or nr >= len(grid) or nc >= len(grid[0]):
+            continue
+        if grid[nr][nc] != "#":
+            yield (nr, nc)
+
+
+def _reconstruct(came_from: Dict[Position, Optional[Position]], goal: Position) -> List[Position]:
+    path = [goal]
+    current = goal
+    while came_from[current] is not None:
+        current = came_from[current]
+        path.append(current)
+    path.reverse()
+    return path
+
+
+def ucs_path(
+    grid: List[str],
+    start: Position,
+    goal: Position,
+    record_expansions: bool = False,
+) -> SearchResult:
+    """Compute the lowest-cost path on a grid using UCS (Dijkstra).
+    Cost per move is 1. Walls are '#'. Returns path + search statistics.
     """
-    Find a path using Uniform Cost Search.
-    
-    Args:
-        grid: The warehouse grid
-        start: Starting position
-        goal: Goal position
-    
-    Returns:
-        Tuple of (path, statistics_dict)
-    """
-    pathfinder = UCSPathfinder(grid, start, goal)
-    return pathfinder.search()
+    import time
+    start_time = time.perf_counter()
+
+    # frontier is a min-heap of (path_cost, tie_breaker, position)
+    frontier: List[Tuple[int, int, Position]] = []
+    heappush(frontier, (0, 0, start))
+
+    # came_from lets us reconstruct the path at the end
+    came_from: Dict[Position, Optional[Position]] = {start: None}
+
+    # cost_so_far stores the best known cost to each position
+    cost_so_far: Dict[Position, int] = {start: 0}
+
+    nodes_expanded = 0
+    frontier_max = 1
+    tie = 0
+    expanded_order: List[Position] = []
+
+    while frontier:
+        # Always expand the cheapest path so far
+        cost, _, current = heappop(frontier)
+        nodes_expanded += 1
+        if record_expansions:
+            expanded_order.append(current)
+
+        # Goal test: stop once we pop the goal from the frontier
+        if current == goal:
+            path = _reconstruct(came_from, goal)
+            return SearchResult(
+                path=path,
+                cost=cost,
+                nodes_expanded=nodes_expanded,
+                frontier_max=frontier_max,
+                time_sec=time.perf_counter() - start_time,
+                expanded_order=expanded_order,
+            )
+
+        # Explore neighbors (up, down, left, right) and relax edges
+        for nxt in _neighbors(grid, current):
+            new_cost = cost_so_far[current] + 1  # each move costs 1
+
+            # If this is a better path to nxt, record it and push to frontier
+            if nxt not in cost_so_far or new_cost < cost_so_far[nxt]:
+                cost_so_far[nxt] = new_cost
+                came_from[nxt] = current
+                tie += 1  # ensures heap order is stable when costs tie
+                heappush(frontier, (new_cost, tie, nxt))
+                if len(frontier) > frontier_max:
+                    frontier_max = len(frontier)
+
+    return SearchResult(
+        path=[],
+        cost=float("inf"),
+        nodes_expanded=nodes_expanded,
+        frontier_max=frontier_max,
+        time_sec=time.perf_counter() - start_time,
+        expanded_order=expanded_order,
+    )
+
+
+if __name__ == "__main__":
+    # Simple smoke test on the default warehouse grid.
+    from warehouse_env import WarehouseEnv
+
+    env = WarehouseEnv()
+    obs = env.reset(randomize=False)
+    start = obs["robot_pos"]
+    pickup = obs["pickup_pos"]
+    if pickup is None:
+        raise RuntimeError("No pickup tile found in grid.")
+    result = ucs_path(env.grid, start, pickup)
+    print("UCS path length:", len(result.path) - 1)
+    print("Nodes expanded:", result.nodes_expanded)

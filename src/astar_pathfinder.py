@@ -1,147 +1,123 @@
-"""
-A* search pathfinder for warehouse environment.
-Uses priority queue ordered by f(n) = g(n) + h(n).
-h(n) is the Manhattan distance heuristic.
-"""
-
+"""A* pathfinding for the warehouse grid."""
 from __future__ import annotations
+from dataclasses import dataclass
+from heapq import heappop, heappush
+from typing import Dict, Iterable, List, Optional, Tuple
 
-import heapq
-import time
-from typing import Dict, List, Tuple
-from warehouse_env import WarehouseEnv
-
-
-class AStarPathfinder:
-    """A* search pathfinder with Manhattan distance heuristic."""
-    
-    def __init__(self, grid: List[str], start_pos: Tuple[int, int], goal_pos: Tuple[int, int]):
-        """
-        Initialize A* pathfinder.
-        
-        Args:
-            grid: The warehouse grid
-            start_pos: Starting position
-            goal_pos: Goal position
-        """
-        self.grid = grid
-        self.start_pos = start_pos
-        self.goal_pos = goal_pos
-        self.height = len(grid)
-        self.width = len(grid[0])
-        
-        # Statistics
-        self.nodes_expanded = 0
-        self.frontier_size = 0
-        self.computation_time = 0.0
-        self.path_length = 0
-        
-    def is_wall(self, pos: Tuple[int, int]) -> bool:
-        """Check if a position is a wall."""
-        r, c = pos
-        if r < 0 or c < 0 or r >= self.height or c >= self.width:
-            return True
-        return self.grid[r][c] == "#"
-    
-    def heuristic(self, pos: Tuple[int, int]) -> int:
-        """
-        Manhattan distance heuristic.
-        h(n) = |x_n - x_goal| + |y_n - y_goal|
-        """
-        r, c = pos
-        goal_r, goal_c = self.goal_pos
-        return abs(r - goal_r) + abs(c - goal_c)
-    
-    def get_neighbors(self, pos: Tuple[int, int]) -> List[Tuple[int, int]]:
-        """Get valid neighbors (Manhattan distance moves)."""
-        r, c = pos
-        neighbors = []
-        for dr, dc in [(-1, 0), (0, 1), (1, 0), (0, -1)]:  # N, E, S, W
-            nr, nc = r + dr, c + dc
-            if not self.is_wall((nr, nc)):
-                neighbors.append((nr, nc))
-        return neighbors
-    
-    def search(self) -> Tuple[List[Tuple[int, int]] | None, Dict]:
-        """
-        Perform A* search.
-        
-        Returns:
-            Tuple of (path, statistics_dict)
-            path: List of positions from start to goal, or None if no path exists
-            statistics_dict: Dict with search statistics
-        """
-        start_time = time.time()
-        
-        # Priority queue: (f_score, counter, node)
-        # Counter is used to break ties in priority queue
-        counter = 0
-        frontier = [(self.heuristic(self.start_pos), counter, self.start_pos)]
-        explored = set()
-        parent = {self.start_pos: None}
-        g_score = {self.start_pos: 0}
-        
-        path = None
-        
-        while frontier:
-            self.frontier_size = len(frontier)
-            f_score, _, current = heapq.heappop(frontier)
-            
-            if current in explored:
-                continue
-                
-            explored.add(current)
-            self.nodes_expanded += 1
-            
-            # Goal test
-            if current == self.goal_pos:
-                # Reconstruct path
-                path = []
-                node = current
-                while node is not None:
-                    path.append(node)
-                    node = parent[node]
-                path.reverse()
-                self.path_length = len(path)
-                break
-            
-            # Expand neighbors
-            for neighbor in self.get_neighbors(current):
-                if neighbor not in explored:
-                    tentative_g = g_score[current] + 1  # Each step costs 1
-                    
-                    if neighbor not in g_score or tentative_g < g_score[neighbor]:
-                        g_score[neighbor] = tentative_g
-                        parent[neighbor] = current
-                        h_score = self.heuristic(neighbor)
-                        f_score_neighbor = tentative_g + h_score
-                        counter += 1
-                        heapq.heappush(frontier, (f_score_neighbor, counter, neighbor))
-        
-        self.computation_time = time.time() - start_time
-        
-        stats = {
-            "nodes_expanded": self.nodes_expanded,
-            "path_length": self.path_length,
-            "computation_time": self.computation_time,
-            "frontier_size": self.frontier_size,
-            "path_found": path is not None,
-        }
-        
-        return path, stats
+Position = Tuple[int, int]
 
 
-def find_path_astar(grid: List[str], start: Tuple[int, int], goal: Tuple[int, int]) -> Tuple[List[Tuple[int, int]] | None, Dict]:
-    """
-    Find a path using A* search.
-    
-    Args:
-        grid: The warehouse grid
-        start: Starting position
-        goal: Goal position
-    
-    Returns:
-        Tuple of (path, statistics_dict)
-    """
-    pathfinder = AStarPathfinder(grid, start, goal)
-    return pathfinder.search()
+@dataclass(frozen=True)
+class SearchResult:
+    path: List[Position]
+    cost: int
+    nodes_expanded: int
+    frontier_max: int
+    time_sec: float
+    expanded_order: List[Position]
+
+
+def manhattan(a: Position, b: Position) -> int:
+    return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+
+def _neighbors(grid: List[str], pos: Position) -> Iterable[Position]:
+    r, c = pos
+    for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+        nr, nc = r + dr, c + dc
+        if nr < 0 or nc < 0 or nr >= len(grid) or nc >= len(grid[0]):
+            continue
+        if grid[nr][nc] != "#":
+            yield (nr, nc)
+
+
+def _reconstruct(came_from: Dict[Position, Optional[Position]], goal: Position) -> List[Position]:
+    path = [goal]
+    current = goal
+    while came_from[current] is not None:
+        current = came_from[current]
+        path.append(current)
+    path.reverse()
+    return path
+
+
+def astar_path(
+    grid: List[str],
+    start: Position,
+    goal: Position,
+    record_expansions: bool = False,
+) -> SearchResult:
+    """Compute a path on a grid using A* with Manhattan heuristic."""
+    import time
+    start_time = time.perf_counter()
+
+    # frontier is a min-heap of (priority=f, path_cost=g, tie_breaker, position)
+    frontier: List[Tuple[int, int, int, Position]] = []
+    heappush(frontier, (manhattan(start, goal), 0, 0, start))
+
+    # came_from lets us reconstruct the path at the end
+    came_from: Dict[Position, Optional[Position]] = {start: None}
+
+    # cost_so_far stores the best known g(n) to each position
+    cost_so_far: Dict[Position, int] = {start: 0}
+
+    nodes_expanded = 0
+    frontier_max = 1
+    tie = 0
+    expanded_order: List[Position] = []
+
+    while frontier:
+        # Always expand the lowest f(n) = g(n) + h(n)
+        _, cost, _, current = heappop(frontier)
+        nodes_expanded += 1
+        if record_expansions:
+            expanded_order.append(current)
+
+        # Goal test: stop once we pop the goal from the frontier
+        if current == goal:
+            path = _reconstruct(came_from, goal)
+            return SearchResult(
+                path=path,
+                cost=cost,
+                nodes_expanded=nodes_expanded,
+                frontier_max=frontier_max,
+                time_sec=time.perf_counter() - start_time,
+                expanded_order=expanded_order,
+            )
+
+        # Explore neighbors (up, down, left, right) and relax edges
+        for nxt in _neighbors(grid, current):
+            new_cost = cost_so_far[current] + 1  # g(n) + cost of one step
+
+            # If this is a better path to nxt, record it and push to frontier
+            if nxt not in cost_so_far or new_cost < cost_so_far[nxt]:
+                cost_so_far[nxt] = new_cost
+                came_from[nxt] = current
+                tie += 1  # ensures heap order is stable when priorities tie
+                priority = new_cost + manhattan(nxt, goal)  # f(n) = g(n) + h(n)
+                heappush(frontier, (priority, new_cost, tie, nxt))
+                if len(frontier) > frontier_max:
+                    frontier_max = len(frontier)
+
+    return SearchResult(
+        path=[],
+        cost=float("inf"),
+        nodes_expanded=nodes_expanded,
+        frontier_max=frontier_max,
+        time_sec=time.perf_counter() - start_time,
+        expanded_order=expanded_order,
+    )
+
+
+if __name__ == "__main__":
+    from warehouse_env import WarehouseEnv
+
+    env = WarehouseEnv()
+    obs = env.reset(randomize=False)
+    start = obs["robot_pos"]
+    pickup = obs["pickup_pos"]
+    if pickup is None:
+        raise RuntimeError("No pickup tile found in grid.")
+    result = astar_path(env.grid, start, pickup)
+    print("A* path length:", len(result.path) - 1)
+    print("Nodes expanded:", result.nodes_expanded)
